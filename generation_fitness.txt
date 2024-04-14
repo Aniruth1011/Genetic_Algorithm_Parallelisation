@@ -1,4 +1,0 @@
-Generation: 1, Average Population Fitness: 0.199979
-Generation: 2, Average Population Fitness: 0.200546
-Generation: 3, Average Population Fitness: 0.200157
-Generation: 4, Average Population Fitness: 0.199516
