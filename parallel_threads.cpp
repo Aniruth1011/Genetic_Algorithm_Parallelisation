@@ -1,11 +1,13 @@
 #include <iostream>
-#include <fstream>
 #include <vector>
 #include <random>
 #include <algorithm>
 #include <cmath>
-#include <omp.h>
+#include <fstream>
 #include <chrono>
+#include <thread>
+#include <mutex>
+#include <omp.h>
 
 struct NeuralNetwork {
     int inputSize;
@@ -52,7 +54,6 @@ struct NeuralNetwork {
             biasHidden[i] = getRandomWeight();
         }
 
-        // Initialize weights and biases for hidden to output layer
         weightsHiddenOutput.resize(hiddenSize, std::vector<double>(outputSize));
         #pragma omp parallel for
         for (int i = 0; i < hiddenSize; ++i) {
@@ -97,20 +98,6 @@ struct NeuralNetwork {
 
         return softmax(output);
     }
-      ~NeuralNetwork() {
-    // Destructor to properly deallocate memory
-    for (auto& row : weightsInputHidden) {
-      row.clear();
-    }
-    weightsInputHidden.clear();
-    biasHidden.clear();
-    for (auto& row : weightsHiddenOutput) {
-      row.clear();
-    }
-    weightsHiddenOutput.clear();
-    biasOutput.clear();
-  }
-
 };
 
 std::pair<std::vector<std::vector<double>>, std::vector<int>> generateDummyData(int numSamples, int inputSize, int numClasses, std::mt19937& gen) {
@@ -121,24 +108,19 @@ std::pair<std::vector<std::vector<double>>, std::vector<int>> generateDummyData(
 
     for (int i = 0; i < numSamples; ++i) {
         std::vector<double> sample(inputSize, 0.0);
-        // Generate features with a more complex distribution
         for (int j = 0; j < inputSize; ++j) {
-            // Use a combination of normal distributions and non-linear transformations
             double x = normalDist(gen);
             double y = normalDist(gen);
-            sample[j] = sin(x) * cos(y); // Example of non-linear transformation
+            sample[j] = sin(x) * cos(y);
         }
         data.push_back(sample);
-        labels.push_back(gen() % numClasses); // Randomly assign labels
+        labels.push_back(gen() % numClasses);
     }
 
     return {data, labels};
 }
 
-// Define a Fitness function to evaluate the performance of a neural network
 double evaluateFitness(const NeuralNetwork& network, const std::vector<std::vector<double>>& data, const std::vector<int>& labels) {
-    // Evaluate the fitness of the neural network based on some criteria
-    // e.g., accuracy, error rate, etc.
     int correctPredictions = 0;
     int totalSamples = data.size();
 
@@ -151,16 +133,17 @@ double evaluateFitness(const NeuralNetwork& network, const std::vector<std::vect
         }
     }
 
-    return static_cast<double>(correctPredictions) / totalSamples; // Accuracy
+    double fitness = static_cast<double>(correctPredictions) / totalSamples;
+    #pragma omp single
+    std::cout << "Fitness: " << fitness << std::endl;
+    return fitness;
 }
 
-// Define a Chromosome representing a neural network's parameters
 struct Chromosome {
     NeuralNetwork network;
     double fitness;
 };
 
-// Define a Genetic Algorithm class
 class GeneticAlgorithm {
 private:
     std::vector<Chromosome> population;
@@ -171,10 +154,15 @@ private:
     int outputSize;
     std::vector<std::vector<double>> data;
     std::vector<int> labels;
+    int numGenerations;
+    int numWorkers;
+    std::mutex populationMutex;
 
     void initializePopulation() {
+        #pragma omp parallel for
         for (int i = 0; i < populationSize; ++i) {
             NeuralNetwork network(inputSize, hiddenSize, outputSize);
+            #pragma omp critical
             population.push_back({network, 0.0});
         }
     }
@@ -182,6 +170,13 @@ private:
     void evaluatePopulation() {
         #pragma omp parallel for
         for (auto& chromosome : population) {
+            chromosome.fitness = evaluateFitness(chromosome.network, data, labels);
+        }
+    }
+
+    void evaluatePopulationParallel(int start, int end) {
+        for (int i = start; i < end; ++i) {
+            Chromosome& chromosome = population[i];
             chromosome.fitness = evaluateFitness(chromosome.network, data, labels);
         }
     }
@@ -224,25 +219,25 @@ private:
                 network.biasOutput[i] += getRandomMutation();
             }
         }
-}
+    }
 
-bool shouldMutate() {
-    static std::random_device rd;
-    static std::mt19937 gen(rd());
-    static std::uniform_real_distribution<double> dis(0.0, 1.0);
-    return dis(gen) < mutationRate;
-}
+    bool shouldMutate() {
+        static std::random_device rd;
+        static std::mt19937 gen(rd());
+        static std::uniform_real_distribution<double> dis(0.0, 1.0);
+        return dis(gen) < mutationRate;
+    }
 
-double getRandomMutation() {
-    static std::random_device rd;
-    static std::mt19937 gen(rd());
-    static std::uniform_real_distribution<double> dis(-0.1, 0.1);
-    return dis(gen);
-}
+    double getRandomMutation() {
+        static std::random_device rd;
+        static std::mt19937 gen(rd());
+        static std::uniform_real_distribution<double> dis(-0.1, 0.1);
+        return dis(gen);
+    }
 
 public:
-    GeneticAlgorithm(int popSize, double mutationRate, int input, int hidden, int output)
-        : populationSize(popSize), mutationRate(mutationRate), inputSize(input), hiddenSize(hidden), outputSize(output) {
+    GeneticAlgorithm(int popSize, double mutationRate, int input, int hidden, int output, int generations, int workers)
+        : populationSize(popSize), mutationRate(mutationRate), inputSize(input), hiddenSize(hidden), outputSize(output), numGenerations(generations), numWorkers(workers) {
         initializePopulation();
     }
 
@@ -251,72 +246,78 @@ public:
         labels = inputLabels;
     }
 
-    void evolve(int generation) {
-        evaluatePopulation();
+    void evolve() {
+        std::ofstream outputFile("generation_fitness.txt");
 
-        std::vector<Chromosome> newPopulation;
+        for (int generation = 0; generation < numGenerations; ++generation) {
+            evaluatePopulation();
 
-        auto bestChromosome = std::max_element(population.begin(), population.end(),
-                                               [](const Chromosome& a, const Chromosome& b) {
-                                                   return a.fitness < b.fitness;
-                                               });
-        newPopulation.push_back(*bestChromosome);
+            std::vector<Chromosome> newPopulation;
 
-        #pragma omp parallel for
-        for (int i = 1; i < populationSize; ++i) {
-            Chromosome parent1 = selectParent();
-            Chromosome parent2 = selectParent();
+            auto bestChromosome = std::max_element(population.begin(), population.end(),
+                                                   [](const Chromosome& a, const Chromosome& b) {
+                                                       return a.fitness < b.fitness;
+                                                   });
+            newPopulation.push_back(*bestChromosome);
 
-            Chromosome offspring = crossover(parent1, parent2);
+            double overallFitness = 0.0;
+            for (const auto& chromosome : population) {
+                overallFitness += chromosome.fitness;
+            }
 
-            mutate(offspring);
+            double avgFitness = overallFitness / populationSize;
+            std::cout << "Generation: " << generation + 1 << ", Average Population Fitness: " << avgFitness << std::endl;
+            outputFile << "Generation: " << generation + 1 << ", Average Population Fitness: " << avgFitness << std::endl;
 
-            #pragma omp critical
-            newPopulation.push_back(offspring);
+            std::vector<std::thread> threads;
+            int chunkSize = populationSize / numWorkers;
+            for (int i = 0; i < numWorkers; ++i) {
+                int start = i * chunkSize;
+                int end = (i == numWorkers - 1) ? populationSize : (i + 1) * chunkSize;
+                threads.emplace_back(&GeneticAlgorithm::evaluatePopulationParallel, this, start, end);
+            }
+
+            for (auto& thread : threads) {
+                thread.join();
+            }
+
+            for (int i = 1; i < populationSize; ++i) {
+                Chromosome parent1 = selectParent();
+                Chromosome parent2 = selectParent();
+                Chromosome offspring = crossover(parent1, parent2);
+                mutate(offspring);
+                newPopulation.push_back(offspring);
+            }
+
+            population = std::move(newPopulation);
         }
 
-        population = std::move(newPopulation);
-
-        double totalFitness = 0.0;
-        for (const auto& chromosome : population) {
-            totalFitness += chromosome.fitness;
-        }
-        double averageFitness = totalFitness / populationSize;
-
-        std::cout << "Generation " << generation << ": Average Fitness = " << averageFitness << std::endl;
-
-        std::ofstream outputFile("generation_parallel_fitness.txt", std::ios::app);
-        if (outputFile.is_open()) {
-            outputFile << "Generation " << generation << ": Average Fitness = " << averageFitness << std::endl;
-            outputFile.close();
-        } else {
-            std::cerr << "Error: Unable to open output file." << std::endl;
-        }
+        outputFile.close();
     }
 };
 
 int main() {
-
     std::random_device rd;
     std::mt19937 gen(rd());
 
     auto startTime = std::chrono::high_resolution_clock::now();
+
     int populationSize = 500;
     double mutationRate = 0.3;
-    int inputSize = 10; 
-    int hiddenSize = 20; 
-    int outputSize = 5; 
-    GeneticAlgorithm ga(populationSize, mutationRate, inputSize, hiddenSize, outputSize);
+    int inputSize = 20;
+    int hiddenSize = 10;
+    int outputSize = 5;
+    int numGenerations = 100;
+    int numWorkers = 4;
+
+    GeneticAlgorithm ga(populationSize, mutationRate, inputSize, hiddenSize, outputSize, numGenerations, numWorkers);
 
     int numSamples = 2000;
     int numClasses = outputSize;
     auto [data, labels] = generateDummyData(numSamples, inputSize, numClasses, gen);
     ga.setData(data, labels);
 
-    int numGenerations = 100;
-    for (int i = 0; i < numGenerations; ++i) {
-        ga.evolve(i + 1); 
-    }
+    ga.evolve();
 
     auto endTime = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> totalTime = endTime - startTime;
