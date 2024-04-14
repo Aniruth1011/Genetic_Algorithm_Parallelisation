@@ -998,3 +998,5 @@ Generation 997: Average Fitness = 0.000475
 Generation 998: Average Fitness = 0.000475
 Generation 999: Average Fitness = 0.000475
 Generation 1000: Average Fitness = 0.000475
+Generation 1: Average Fitness = 0.000444
+Generation 1: Average Fitness = 0.000445
